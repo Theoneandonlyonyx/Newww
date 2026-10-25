@@ -1,0 +1,62 @@
+name: build-jar
+on:
+  push:
+  workflow_dispatch:
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Pick the newest zip and unpack it
+        run: |
+          shopt -s nullglob
+          zips=(*.zip)
+          if [ ${#zips[@]} -eq 0 ]; then
+            echo "No zip in the repo root, building the repo root itself"
+            echo "SRC=." >> "$GITHUB_ENV"
+          else
+            newest=""; best=-1
+            for z in "${zips[@]}"; do
+              t=$(git log -1 --format=%ct -- "$z")
+              t=${t:-0}
+              if [ "$t" -gt "$best" ] || { [ "$t" -eq "$best" ] && [[ "$z" > "$newest" ]]; }; then
+                best=$t; newest=$z
+              fi
+            done
+            echo "Using zip: $newest"
+            rm -rf _src && mkdir _src
+            unzip -q -o "$newest" -d _src
+            gradle_file=$(find _src -name build.gradle | head -1)
+            test -n "$gradle_file"
+            echo "SRC=$(dirname "$gradle_file")" >> "$GITHUB_ENV"
+          fi
+      - name: Patch Java error in ClientFilter.java
+        run: |
+          TARGET_FILE=$(find . -name ClientFilter.java | head -1)
+          if [ -f "$TARGET_FILE" ]; then
+            echo "Patching: $TARGET_FILE"
+            # Ersetzt den fehlerhaften Lambda-Aufruf durch einen sicheren Platzhalter
+            sed -i 's/b -> apply(screen, key.equals(active) ? "all" : key)/b -> {}/g' "$TARGET_FILE"
+            # Fügt die onPress-Methode am Ende vor der letzten geschlossenen Klammer ein
+            tac "$TARGET_FILE" | sed '0,/}/s//}\n\n    @Override\n    public void onPress() {\n        apply(this.screen, this.key.equals(this.active) ? "all" : this.key);\n    }/' | tac > "$TARGET_FILE.tmp"
+            mv "$TARGET_FILE.tmp" "$TARGET_FILE"
+            echo "Erfolgreich gepatched."
+          else
+            echo "Datei nicht gefunden."
+          fi
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+      - uses: gradle/actions/setup-gradle@v3
+        with:
+          gradle-version: 8.1.1
+      - run: gradle build --no-daemon
+        working-directory: ${{ env.SRC }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: PlantMegaPack-mikexxx-port-jar
+          path: ${{ env.SRC }}/build/libs/*.jar
+          if-no-files-found: error
